@@ -1,5 +1,6 @@
 import fs from "fs/promises"
 import path from "path"
+import os from "os"
 import { Mode } from "../../../shared/modes"
 import { fileExistsAtPath } from "../../../utils/fs"
 
@@ -50,15 +51,34 @@ export function getSystemPromptFilePath(cwd: string, mode: Mode): string {
 }
 
 /**
- * Loads custom system prompt from a file at .roo/system-prompt-[mode slug]
- * If the file doesn't exist, returns an empty string
+ * Get the path to a global system prompt file for a specific mode
+ * Located in the user's home directory under .roo/system-prompt-[mode slug]
+ */
+export function getGlobalSystemPromptFilePath(mode: Mode): string {
+	return path.join(os.homedir(), ".roo", `system-prompt-${mode}`)
+}
+
+/**
+ * Loads custom system prompt from a file, checking in the following order:
+ * 1. Local project: .roo/system-prompt-[mode slug]
+ * 2. Global (home directory): ~/.roo/system-prompt-[mode slug]
+ * If neither file exists, returns an empty string
  */
 export async function loadSystemPromptFile(cwd: string, mode: Mode, variables: PromptVariables): Promise<string> {
-	const filePath = getSystemPromptFilePath(cwd, mode)
-	const rawContent = await safeReadFile(filePath)
+	// First, check for local project-specific system prompt
+	const localFilePath = getSystemPromptFilePath(cwd, mode)
+	let rawContent = await safeReadFile(localFilePath)
+
+	// If no local file exists, check for global system prompt
+	if (!rawContent) {
+		const globalFilePath = getGlobalSystemPromptFilePath(mode)
+		rawContent = await safeReadFile(globalFilePath)
+	}
+
 	if (!rawContent) {
 		return ""
 	}
+
 	const interpolatedContent = interpolatePromptContent(rawContent, variables)
 	return interpolatedContent
 }
