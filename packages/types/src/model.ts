@@ -64,6 +64,8 @@ export const modelInfoSchema = z.object({
 	supportsReasoningBudget: z.boolean().optional(),
 	// Capability flag to indicate whether the model supports temperature parameter
 	supportsTemperature: z.boolean().optional(),
+	// When true, force-disable request timeouts for this model (providers will set timeout=0)
+	disableTimeout: z.boolean().optional(),
 	requiredReasoningBudget: z.boolean().optional(),
 	supportsReasoningEffort: z.boolean().optional(),
 	supportedParameters: z.array(modelParametersSchema).optional(),
