@@ -89,37 +89,6 @@ describe("OllamaHandler timeout configuration", () => {
 		)
 	})
 
-	it("should force zero timeout when model info disables timeout", () => {
-		;(getApiRequestTimeout as any).mockReturnValue(600000)
-
-		const spy = vitest.spyOn(OllamaHandler.prototype as any, "getModel").mockReturnValue({
-			id: "llama2",
-			info: {
-				maxTokens: -1,
-				contextWindow: 128000,
-				supportsPromptCache: false,
-				supportsImages: true,
-				disableTimeout: true,
-			},
-		})
-
-		const options: ApiHandlerOptions = {
-			apiModelId: "llama2",
-			ollamaModelId: "llama2",
-			ollamaBaseUrl: "http://localhost:11434",
-		}
-
-		new OllamaHandler(options)
-
-		expect(mockOpenAIConstructor).toHaveBeenCalledWith(
-			expect.objectContaining({
-				timeout: 0,
-			}),
-		)
-
-		spy.mockRestore()
-	})
-
 	it("should use default base URL when not provided", () => {
 		;(getApiRequestTimeout as any).mockReturnValue(600000)
 
