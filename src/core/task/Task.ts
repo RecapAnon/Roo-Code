@@ -1974,6 +1974,23 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 									pendingGroundingSources.push(...chunk.sources)
 								}
 								break
+							case "status": {
+								try {
+									const apiReqMsg = this.clineMessages[lastApiReqIndex]
+									if (apiReqMsg && apiReqMsg.type === "say" && apiReqMsg.say === "api_req_started") {
+										;(apiReqMsg as any).metadata = (apiReqMsg as any).metadata || {}
+										if (chunk.mode === "background") {
+											;(apiReqMsg as any).metadata.background = true
+										}
+										;(apiReqMsg as any).metadata.backgroundStatus = chunk.status
+										if (chunk.responseId) {
+											;(apiReqMsg as any).metadata.responseId = chunk.responseId
+										}
+										await this.updateClineMessage(apiReqMsg)
+									}
+								} catch {}
+								break
+							}
 							case "text": {
 								assistantMessage += chunk.text
 

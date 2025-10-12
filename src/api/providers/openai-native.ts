@@ -39,6 +39,10 @@ export class OpenAiNativeHandler extends BaseProvider implements SingleCompletio
 	private responseIdResolver: ((value: string | undefined) => void) | undefined
 	// Resolved service tier from Responses API (actual tier used by OpenAI)
 	private lastServiceTier: ServiceTier | undefined
+	private lastSequenceNumber: number | undefined
+	// Track whether current request is in background mode for status chunk annotation
+	private currentRequestIsBackground?: boolean
+	private resumeCutoffSequence?: number
 
 	// Event types handled by the shared event processor to avoid duplication
 	private readonly coreHandledEventTypes = new Set<string>([
@@ -245,6 +249,7 @@ export class OpenAiNativeHandler extends BaseProvider implements SingleCompletio
 			store?: boolean
 			instructions?: string
 			service_tier?: ServiceTier
+			background?: boolean
 		}
 
 		// Validate requested tier against model support; if not supported, omit.
@@ -290,6 +295,13 @@ export class OpenAiNativeHandler extends BaseProvider implements SingleCompletio
 			body.text = { verbosity: (verbosity || "medium") as VerbosityLevel }
 		}
 
+		// Enable background mode when either explicitly opted in or required by model metadata
+		if (this.options.openAiNativeBackgroundMode === true || model.info.backgroundMode === true) {
+			body.background = true
+			body.stream = true
+			body.store = true
+		}
+
 		return body
 	}
 
@@ -300,6 +312,15 @@ export class OpenAiNativeHandler extends BaseProvider implements SingleCompletio
 		systemPrompt?: string,
 		messages?: Anthropic.Messages.MessageParam[],
 	): ApiStream {
+		// Annotate if this request uses background mode (used for status chunks)
+		this.currentRequestIsBackground = !!requestBody?.background
+
+		const canAttemptResume = () =>
+			this.currentRequestIsBackground &&
+			(this.options.openAiNativeBackgroundAutoResume ?? true) &&
+			!!this.lastResponseId &&
+			typeof this.lastSequenceNumber === "number"
+
 		try {
 			// Use the official SDK
 			const stream = (await (this.client as any).responses.create(requestBody)) as AsyncIterable<any>
@@ -310,10 +331,25 @@ export class OpenAiNativeHandler extends BaseProvider implements SingleCompletio
 				)
 			}
 
-			for await (const event of stream) {
-				for await (const outChunk of this.processEvent(event, model)) {
-					yield outChunk
+			try {
+				for await (const event of stream) {
+					for await (const outChunk of this.processEvent(event, model)) {
+						yield outChunk
+					}
 				}
+			} catch (iterErr) {
+				// Stream dropped mid-flight; attempt resume for background requests
+				if (canAttemptResume()) {
+					for await (const chunk of this.attemptResumeOrPoll(
+						this.lastResponseId!,
+						this.lastSequenceNumber!,
+						model,
+					)) {
+						yield chunk
+					}
+					return
+				}
+				throw iterErr
 			}
 		} catch (sdkErr: any) {
 			// Check if this is a 400 error about previous_response_id not found
@@ -323,8 +359,6 @@ export class OpenAiNativeHandler extends BaseProvider implements SingleCompletio
 				errorMessage.includes("Previous response") || errorMessage.includes("not found")
 
 			if (is400Error && requestBody.previous_response_id && isPreviousResponseError) {
-				// Log the error and retry without the previous_response_id
-
 				// Clear the stored lastResponseId to prevent using it again
 				this.lastResponseId = undefined
 
@@ -346,6 +380,53 @@ export class OpenAiNativeHandler extends BaseProvider implements SingleCompletio
 
 					if (typeof (retryStream as any)[Symbol.asyncIterator] !== "function") {
 						// If SDK fails, fall back to SSE
+						try {
+							yield* this.makeGpt5ResponsesAPIRequest(
+								retryRequestBody,
+								model,
+								metadata,
+								systemPrompt,
+								messages,
+							)
+							return
+						} catch (fallbackErr) {
+							if (canAttemptResume()) {
+								for await (const chunk of this.attemptResumeOrPoll(
+									this.lastResponseId!,
+									this.lastSequenceNumber!,
+									model,
+								)) {
+									yield chunk
+								}
+								return
+							}
+							throw fallbackErr
+						}
+					}
+
+					try {
+						for await (const event of retryStream) {
+							for await (const outChunk of this.processEvent(event, model)) {
+								yield outChunk
+							}
+						}
+						return
+					} catch (iterErr) {
+						if (canAttemptResume()) {
+							for await (const chunk of this.attemptResumeOrPoll(
+								this.lastResponseId!,
+								this.lastSequenceNumber!,
+								model,
+							)) {
+								yield chunk
+							}
+							return
+						}
+						throw iterErr
+					}
+				} catch (retryErr) {
+					// If retry also fails, fall back to SSE
+					try {
 						yield* this.makeGpt5ResponsesAPIRequest(
 							retryRequestBody,
 							model,
@@ -354,23 +435,42 @@ export class OpenAiNativeHandler extends BaseProvider implements SingleCompletio
 							messages,
 						)
 						return
-					}
-
-					for await (const event of retryStream) {
-						for await (const outChunk of this.processEvent(event, model)) {
-							yield outChunk
+					} catch (fallbackErr) {
+						if (canAttemptResume()) {
+							for await (const chunk of this.attemptResumeOrPoll(
+								this.lastResponseId!,
+								this.lastSequenceNumber!,
+								model,
+							)) {
+								yield chunk
+							}
+							return
 						}
+						throw fallbackErr
 					}
-					return
-				} catch (retryErr) {
-					// If retry also fails, fall back to SSE
-					yield* this.makeGpt5ResponsesAPIRequest(retryRequestBody, model, metadata, systemPrompt, messages)
-					return
 				}
 			}
 
 			// For other errors, fallback to manual SSE via fetch
-			yield* this.makeGpt5ResponsesAPIRequest(requestBody, model, metadata, systemPrompt, messages)
+			try {
+				yield* this.makeGpt5ResponsesAPIRequest(requestBody, model, metadata, systemPrompt, messages)
+			} catch (fallbackErr) {
+				// If SSE fallback fails mid-stream and we can resume, try that
+				if (canAttemptResume()) {
+					for await (const chunk of this.attemptResumeOrPoll(
+						this.lastResponseId!,
+						this.lastSequenceNumber!,
+						model,
+					)) {
+						yield chunk
+					}
+					return
+				}
+				throw fallbackErr
+			}
+		} finally {
+			// Always clear background flag at end of request lifecycle
+			this.currentRequestIsBackground = undefined
 		}
 	}
 
@@ -675,6 +775,20 @@ export class OpenAiNativeHandler extends BaseProvider implements SingleCompletio
 						try {
 							const parsed = JSON.parse(data)
 
+							// Skip stale events when resuming a dropped background stream
+							if (
+								typeof parsed?.sequence_number === "number" &&
+								this.resumeCutoffSequence !== undefined &&
+								parsed.sequence_number <= this.resumeCutoffSequence
+							) {
+								continue
+							}
+
+							// Record sequence number for cursor tracking
+							if (typeof parsed?.sequence_number === "number") {
+								this.lastSequenceNumber = parsed.sequence_number
+							}
+
 							// Store response ID for conversation continuity
 							if (parsed.response?.id) {
 								this.resolveResponseId(parsed.response.id)
@@ -955,14 +1069,31 @@ export class OpenAiNativeHandler extends BaseProvider implements SingleCompletio
 							}
 							// Handle queued event
 							else if (parsed.type === "response.queued") {
-								// Response is queued
+								yield {
+									type: "status",
+									mode: this.currentRequestIsBackground ? "background" : undefined,
+									status: "queued",
+									...(parsed.response?.id ? { responseId: parsed.response.id } : {}),
+								}
 							}
 							// Handle in_progress event
 							else if (parsed.type === "response.in_progress") {
-								// Response is being processed
+								yield {
+									type: "status",
+									mode: this.currentRequestIsBackground ? "background" : undefined,
+									status: "in_progress",
+									...(parsed.response?.id ? { responseId: parsed.response.id } : {}),
+								}
 							}
 							// Handle failed event
 							else if (parsed.type === "response.failed") {
+								// Emit failed status for UI lifecycle
+								yield {
+									type: "status",
+									mode: this.currentRequestIsBackground ? "background" : undefined,
+									status: "failed",
+									...(parsed.response?.id ? { responseId: parsed.response.id } : {}),
+								}
 								// Response failed
 								if (parsed.error || parsed.message) {
 									throw new Error(
@@ -978,6 +1109,16 @@ export class OpenAiNativeHandler extends BaseProvider implements SingleCompletio
 								if (parsed.response?.service_tier) {
 									this.lastServiceTier = parsed.response.service_tier as ServiceTier
 								}
+
+								// Emit completed status for UI lifecycle
+								yield {
+									type: "status",
+									mode: this.currentRequestIsBackground ? "background" : undefined,
+									status: "completed",
+									...(parsed.response?.id ? { responseId: parsed.response.id } : {}),
+								}
+								// Clear background marker on completion
+								this.currentRequestIsBackground = undefined
 
 								// Check if the done event contains the complete output (as a fallback)
 								if (
@@ -1095,6 +1236,196 @@ export class OpenAiNativeHandler extends BaseProvider implements SingleCompletio
 	}
 
 	/**
+	 * Attempt to resume a dropped background stream; if resume fails, fall back to polling.
+	 */
+	private async *attemptResumeOrPoll(responseId: string, lastSeq: number, model: OpenAiNativeModel): ApiStream {
+		// Emit reconnecting status
+		yield {
+			type: "status",
+			mode: "background",
+			status: "reconnecting",
+			responseId,
+		}
+
+		const apiKey = this.options.openAiNativeApiKey ?? "not-provided"
+		const baseUrl = this.options.openAiNativeBaseUrl || "https://api.openai.com"
+		const resumeMaxRetries = this.options.openAiNativeBackgroundResumeMaxRetries ?? 3
+		const resumeBaseDelayMs = this.options.openAiNativeBackgroundResumeBaseDelayMs ?? 1000
+
+		// Try streaming resume with exponential backoff
+		for (let attempt = 0; attempt < resumeMaxRetries; attempt++) {
+			try {
+				const resumeUrl = `${baseUrl}/v1/responses/${responseId}?stream=true&starting_after=${lastSeq}`
+				const res = await fetch(resumeUrl, {
+					method: "GET",
+					headers: {
+						Authorization: `Bearer ${apiKey}`,
+						Accept: "text/event-stream",
+					},
+				})
+
+				if (!res.ok || !res.body) {
+					throw new Error(`Resume request failed (${res.status})`)
+				}
+
+				this.resumeCutoffSequence = lastSeq
+
+				let emittedInProgress = false
+				try {
+					for await (const chunk of this.handleStreamResponse(res.body, model)) {
+						// After the handshake and first accepted chunk, emit in_progress once
+						if (!emittedInProgress) {
+							emittedInProgress = true
+							yield {
+								type: "status",
+								mode: "background",
+								status: "in_progress",
+								responseId,
+							}
+						}
+						// Avoid double-emitting in_progress if the inner handler surfaces it
+						if (chunk.type === "status" && (chunk as any).status === "in_progress") {
+							continue
+						}
+						yield chunk
+					}
+					// Successful resume
+					this.resumeCutoffSequence = undefined
+					return
+				} catch (e) {
+					// Resume stream failed mid-flight; reset and throw to retry
+					this.resumeCutoffSequence = undefined
+					throw e
+				}
+			} catch {
+				// Wait with backoff before next attempt
+				const delay = resumeBaseDelayMs * Math.pow(2, attempt)
+				if (delay > 0) {
+					await new Promise((r) => setTimeout(r, delay))
+				}
+			}
+		}
+
+		// Resume failed - begin polling fallback
+		yield {
+			type: "status",
+			mode: "background",
+			status: "polling",
+			responseId,
+		}
+
+		const pollIntervalMs = this.options.openAiNativeBackgroundPollIntervalMs ?? 2000
+		const pollMaxMinutes = this.options.openAiNativeBackgroundPollMaxMinutes ?? 20
+		const deadline = Date.now() + pollMaxMinutes * 60_000
+
+		let lastEmittedStatus: "queued" | "in_progress" | "completed" | "failed" | "canceled" | undefined = undefined
+
+		while (Date.now() <= deadline) {
+			try {
+				const pollRes = await fetch(`${baseUrl}/v1/responses/${responseId}`, {
+					method: "GET",
+					headers: {
+						Authorization: `Bearer ${apiKey}`,
+					},
+				})
+
+				if (!pollRes.ok) {
+					// transient; wait and retry
+					await new Promise((r) => setTimeout(r, pollIntervalMs))
+					continue
+				}
+
+				let raw: any
+				try {
+					raw = await pollRes.json()
+				} catch {
+					await new Promise((r) => setTimeout(r, pollIntervalMs))
+					continue
+				}
+
+				const resp = raw?.response ?? raw
+				const status: string | undefined = resp?.status
+				const respId: string | undefined = resp?.id ?? responseId
+
+				// Capture resolved service tier if present
+				if (resp?.service_tier) {
+					this.lastServiceTier = resp.service_tier as ServiceTier
+				}
+
+				// Emit status transitions
+				if (
+					status &&
+					(status === "queued" ||
+						status === "in_progress" ||
+						status === "completed" ||
+						status === "failed" ||
+						status === "canceled")
+				) {
+					if (status !== lastEmittedStatus) {
+						yield {
+							type: "status",
+							mode: "background",
+							status: status as any,
+							...(respId ? { responseId: respId } : {}),
+						}
+						lastEmittedStatus = status as any
+					}
+				}
+
+				if (status === "completed") {
+					// Synthesize final output
+					const output = resp?.output ?? raw?.output
+					if (Array.isArray(output)) {
+						for (const outputItem of output) {
+							if (outputItem.type === "text" && Array.isArray(outputItem.content)) {
+								for (const content of outputItem.content) {
+									if (content?.type === "text" && typeof content.text === "string") {
+										yield { type: "text", text: content.text }
+									}
+								}
+							} else if (outputItem.type === "message" && Array.isArray(outputItem.content)) {
+								for (const content of outputItem.content) {
+									if (
+										(content?.type === "output_text" || content?.type === "text") &&
+										typeof content.text === "string"
+									) {
+										yield { type: "text", text: content.text }
+									}
+								}
+							} else if (outputItem.type === "reasoning" && Array.isArray(outputItem.summary)) {
+								for (const summary of outputItem.summary) {
+									if (summary?.type === "summary_text" && typeof summary.text === "string") {
+										yield { type: "reasoning", text: summary.text }
+									}
+								}
+							}
+						}
+					}
+
+					// Synthesize usage
+					const usage = resp?.usage ?? raw?.usage
+					const usageData = this.normalizeUsage(usage, model)
+					if (usageData) {
+						yield usageData
+					}
+
+					return
+				}
+
+				if (status === "failed" || status === "canceled") {
+					throw new Error(`Response ${status}: ${respId || responseId}`)
+				}
+			} catch {
+				// ignore transient poll errors
+			}
+
+			await new Promise((r) => setTimeout(r, pollIntervalMs))
+		}
+
+		throw new Error(`Background response polling timed out for ${responseId}`)
+	}
+
+	/**
 	 * Shared processor for Responses API events.
 	 */
 	private async *processEvent(event: any, model: OpenAiNativeModel): ApiStream {
@@ -1105,6 +1436,34 @@ export class OpenAiNativeHandler extends BaseProvider implements SingleCompletio
 		// Capture resolved service tier when available
 		if (event?.response?.service_tier) {
 			this.lastServiceTier = event.response.service_tier as ServiceTier
+		}
+		// Record sequence number for cursor tracking
+		if (typeof event?.sequence_number === "number") {
+			this.lastSequenceNumber = event.sequence_number
+		}
+
+		// Map lifecycle events to status chunks
+		const statusMap: Record<string, "queued" | "in_progress" | "completed" | "failed" | "canceled"> = {
+			"response.queued": "queued",
+			"response.in_progress": "in_progress",
+			"response.completed": "completed",
+			"response.done": "completed",
+			"response.failed": "failed",
+			"response.canceled": "canceled",
+		}
+		const mappedStatus = statusMap[event?.type as string]
+		if (mappedStatus) {
+			yield {
+				type: "status",
+				mode: this.currentRequestIsBackground ? "background" : undefined,
+				status: mappedStatus,
+				...(event?.response?.id ? { responseId: event.response.id } : {}),
+			}
+			// Clear background flag for terminal statuses
+			if (mappedStatus === "completed" || mappedStatus === "failed" || mappedStatus === "canceled") {
+				this.currentRequestIsBackground = undefined
+			}
+			// Do not return; allow further handling (e.g., usage on done/completed)
 		}
 
 		// Handle known streaming text deltas
@@ -1257,6 +1616,14 @@ export class OpenAiNativeHandler extends BaseProvider implements SingleCompletio
 	 */
 	getLastResponseId(): string | undefined {
 		return this.lastResponseId
+	}
+
+	/**
+	 * Gets the last sequence number observed from streaming events.
+	 * @returns The sequence number, or undefined if not available yet
+	 */
+	getLastSequenceNumber(): number | undefined {
+		return this.lastSequenceNumber
 	}
 
 	/**
