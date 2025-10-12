@@ -49,3 +49,7 @@ logs
 
 # Qdrant
 qdrant_storage/
+
+# ignore temp background docs
+TEMP_OPENAI_BACKGROUND_TASK_DOCS.DM
+TEMP_DOCS/
