@@ -38,7 +38,7 @@ export const openAiNativeModels = {
 		],
 	},
 	"gpt-5-pro-2025-10-06": {
-		maxTokens: 272000,
+		maxTokens: 128000,
 		contextWindow: 400000,
 		supportsImages: true,
 		supportsPromptCache: true,
