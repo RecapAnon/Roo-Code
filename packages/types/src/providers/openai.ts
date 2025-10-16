@@ -47,7 +47,7 @@ export const openAiNativeModels = {
 		inputPrice: 15.0,
 		outputPrice: 120.0,
 		description:
-			"GPT-5 Pro: a slow, reasoning-focused model built to tackle tough problems. Requests can take several minutes to finish. Responses API only; no streaming, so it may appear stuck until the reply is ready.",
+			"GPT-5 Pro: A slow, reasoning-focused model for complex problems. Uses background mode with resilient streaming - requests may take several minutes with automatic recovery if connection drops.",
 		supportsVerbosity: true,
 		supportsTemperature: false,
 		backgroundMode: true,
