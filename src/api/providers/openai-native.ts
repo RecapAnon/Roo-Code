@@ -31,6 +31,17 @@ export type OpenAiNativeModel = ReturnType<OpenAiNativeHandler["getModel"]>
 // Constants for model identification
 const GPT5_MODEL_PREFIX = "gpt-5"
 
+// Marker for terminal background-mode failures so we don't attempt resume/poll fallbacks
+function createTerminalBackgroundError(message: string): Error {
+	const err = new Error(message)
+	;(err as any).isTerminalBackgroundError = true
+	err.name = "TerminalBackgroundError"
+	return err
+}
+function isTerminalBackgroundError(err: any): boolean {
+	return !!(err && (err as any).isTerminalBackgroundError)
+}
+
 export class OpenAiNativeHandler extends BaseProvider implements SingleCompletionHandler {
 	protected options: ApiHandlerOptions
 	private client: OpenAI
@@ -338,6 +349,10 @@ export class OpenAiNativeHandler extends BaseProvider implements SingleCompletio
 					}
 				}
 			} catch (iterErr) {
+				// If terminal failure, propagate and do not attempt resume/poll
+				if (isTerminalBackgroundError(iterErr)) {
+					throw iterErr
+				}
 				// Stream dropped mid-flight; attempt resume for background requests
 				if (canAttemptResume()) {
 					for await (const chunk of this.attemptResumeOrPoll(
@@ -352,6 +367,10 @@ export class OpenAiNativeHandler extends BaseProvider implements SingleCompletio
 				throw iterErr
 			}
 		} catch (sdkErr: any) {
+			// Propagate terminal background failures without fallback
+			if (isTerminalBackgroundError(sdkErr)) {
+				throw sdkErr
+			}
 			// Check if this is a 400 error about previous_response_id not found
 			const errorMessage = sdkErr?.message || sdkErr?.error?.message || ""
 			const is400Error = sdkErr?.status === 400 || sdkErr?.response?.status === 400
@@ -412,6 +431,9 @@ export class OpenAiNativeHandler extends BaseProvider implements SingleCompletio
 						}
 						return
 					} catch (iterErr) {
+						if (isTerminalBackgroundError(iterErr)) {
+							throw iterErr
+						}
 						if (canAttemptResume()) {
 							for await (const chunk of this.attemptResumeOrPoll(
 								this.lastResponseId!,
@@ -425,6 +447,9 @@ export class OpenAiNativeHandler extends BaseProvider implements SingleCompletio
 						throw iterErr
 					}
 				} catch (retryErr) {
+					if (isTerminalBackgroundError(retryErr)) {
+						throw retryErr
+					}
 					// If retry also fails, fall back to SSE
 					try {
 						yield* this.makeGpt5ResponsesAPIRequest(
@@ -436,6 +461,9 @@ export class OpenAiNativeHandler extends BaseProvider implements SingleCompletio
 						)
 						return
 					} catch (fallbackErr) {
+						if (isTerminalBackgroundError(fallbackErr)) {
+							throw fallbackErr
+						}
 						if (canAttemptResume()) {
 							for await (const chunk of this.attemptResumeOrPoll(
 								this.lastResponseId!,
@@ -456,6 +484,9 @@ export class OpenAiNativeHandler extends BaseProvider implements SingleCompletio
 				yield* this.makeGpt5ResponsesAPIRequest(requestBody, model, metadata, systemPrompt, messages)
 			} catch (fallbackErr) {
 				// If SSE fallback fails mid-stream and we can resume, try that
+				if (isTerminalBackgroundError(fallbackErr)) {
+					throw fallbackErr
+				}
 				if (canAttemptResume()) {
 					for await (const chunk of this.attemptResumeOrPoll(
 						this.lastResponseId!,
@@ -1058,9 +1089,20 @@ export class OpenAiNativeHandler extends BaseProvider implements SingleCompletio
 							else if (parsed.type === "response.error" || parsed.type === "error") {
 								// Error event from the API
 								if (parsed.error || parsed.message) {
-									throw new Error(
-										`Responses API error: ${parsed.error?.message || parsed.message || "Unknown error"}`,
-									)
+									const errMsg = `Responses API error: ${parsed.error?.message || parsed.message || "Unknown error"}`
+									// For background mode, treat as terminal to avoid futile resume attempts
+									if (this.currentRequestIsBackground) {
+										// Surface a failed status for UI lifecycle before terminating
+										yield {
+											type: "status",
+											mode: "background",
+											status: "failed",
+											...(parsed.response?.id ? { responseId: parsed.response.id } : {}),
+										}
+										throw createTerminalBackgroundError(errMsg)
+									}
+									// Non-background: propagate as a standard error
+									throw new Error(errMsg)
 								}
 							}
 							// Handle incomplete event
@@ -1096,7 +1138,7 @@ export class OpenAiNativeHandler extends BaseProvider implements SingleCompletio
 								}
 								// Response failed
 								if (parsed.error || parsed.message) {
-									throw new Error(
+									throw createTerminalBackgroundError(
 										`Response failed: ${parsed.error?.message || parsed.message || "Unknown failure"}`,
 									)
 								}
@@ -1227,6 +1269,10 @@ export class OpenAiNativeHandler extends BaseProvider implements SingleCompletio
 			// This can happen in certain edge cases and shouldn't break the flow
 		} catch (error) {
 			if (error instanceof Error) {
+				// Preserve terminal background errors so callers can avoid resume attempts
+				if ((error as any).isTerminalBackgroundError) {
+					throw error
+				}
 				throw new Error(`Error processing response stream: ${error.message}`)
 			}
 			throw new Error("Unexpected error processing response stream")
@@ -1264,25 +1310,25 @@ export class OpenAiNativeHandler extends BaseProvider implements SingleCompletio
 					},
 				})
 
-				if (!res.ok || !res.body) {
+				if (!res.ok) {
 					throw new Error(`Resume request failed (${res.status})`)
+				}
+				if (!res.body) {
+					throw new Error("Resume request failed (no body)")
 				}
 
 				this.resumeCutoffSequence = lastSeq
 
-				let emittedInProgress = false
+				// Handshake accepted: immediately switch UI from reconnecting -> in_progress
+				yield {
+					type: "status",
+					mode: "background",
+					status: "in_progress",
+					responseId,
+				}
+
 				try {
 					for await (const chunk of this.handleStreamResponse(res.body, model)) {
-						// After the handshake and first accepted chunk, emit in_progress once
-						if (!emittedInProgress) {
-							emittedInProgress = true
-							yield {
-								type: "status",
-								mode: "background",
-								status: "in_progress",
-								responseId,
-							}
-						}
 						// Avoid double-emitting in_progress if the inner handler surfaces it
 						if (chunk.type === "status" && (chunk as any).status === "in_progress") {
 							continue
@@ -1297,9 +1343,13 @@ export class OpenAiNativeHandler extends BaseProvider implements SingleCompletio
 					this.resumeCutoffSequence = undefined
 					throw e
 				}
-			} catch {
-				// Wait with backoff before next attempt
+			} catch (err) {
+				// If terminal error, don't keep retrying resume; fall back to polling immediately
 				const delay = resumeBaseDelayMs * Math.pow(2, attempt)
+				if (isTerminalBackgroundError(err)) {
+					break
+				}
+				// Otherwise retry with backoff
 				if (delay > 0) {
 					await new Promise((r) => setTimeout(r, delay))
 				}
@@ -1413,10 +1463,21 @@ export class OpenAiNativeHandler extends BaseProvider implements SingleCompletio
 				}
 
 				if (status === "failed" || status === "canceled") {
-					throw new Error(`Response ${status}: ${respId || responseId}`)
+					const detail: string | undefined = resp?.error?.message ?? raw?.error?.message
+					const msg = detail ? `Response ${status}: ${detail}` : `Response ${status}: ${respId || responseId}`
+					throw createTerminalBackgroundError(msg)
 				}
-			} catch {
-				// ignore transient poll errors
+			} catch (err) {
+				// If we've already emitted a terminal status, propagate to consumer to stop polling.
+				if (lastEmittedStatus === "failed" || lastEmittedStatus === "canceled") {
+					throw err
+				}
+				// Otherwise ignore transient poll errors
+			}
+
+			// Stop polling immediately on terminal background statuses
+			if (lastEmittedStatus === "failed" || lastEmittedStatus === "canceled") {
+				throw new Error(`Background polling terminated with status=${lastEmittedStatus} for ${responseId}`)
 			}
 
 			await new Promise((r) => setTimeout(r, pollIntervalMs))
@@ -1462,6 +1523,11 @@ export class OpenAiNativeHandler extends BaseProvider implements SingleCompletio
 			// Clear background flag for terminal statuses
 			if (mappedStatus === "completed" || mappedStatus === "failed" || mappedStatus === "canceled") {
 				this.currentRequestIsBackground = undefined
+			}
+			// Throw terminal error to integrate with standard failure path (surfaced in UI)
+			if (mappedStatus === "failed" || mappedStatus === "canceled") {
+				const msg = (event as any)?.error?.message || (event as any)?.message || `Response ${mappedStatus}`
+				throw createTerminalBackgroundError(msg)
 			}
 			// Do not return; allow further handling (e.g., usage on done/completed)
 		}
