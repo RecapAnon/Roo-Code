@@ -1986,10 +1986,6 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 										if (chunk.responseId) {
 											;(apiReqMsg as any).metadata.responseId = chunk.responseId
 										}
-										// Temporary debug to confirm UI metadata updates
-										console.log(
-											`[BackgroundMode] status update -> ${chunk.status} (resp=${chunk.responseId ?? "n/a"})`,
-										)
 										await this.updateClineMessage(apiReqMsg)
 										// Force state refresh to ensure UI recomputes derived labels/memos
 										const provider = this.providerRef.deref()
