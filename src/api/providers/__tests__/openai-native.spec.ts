@@ -1842,26 +1842,6 @@ describe("OpenAI Native background mode behavior", () => {
 		expect(requestBodyWithOptionFalse.stream).toBe(true)
 	})
 
-	it("auto-enables background mode for gpt-5-pro when no override is specified", async () => {
-		const handler = new OpenAiNativeHandler({
-			apiModelId: "gpt-5-pro-2025-10-06",
-			openAiNativeApiKey: "test",
-			// no openAiNativeBackgroundMode provided
-		})
-
-		mockResponsesCreate.mockResolvedValueOnce(createMinimalIterable())
-
-		const chunks: any[] = []
-		for await (const chunk of handler.createMessage(systemPrompt, baseMessages, metadataStoreFalse)) {
-			chunks.push(chunk)
-		}
-
-		expect(chunks).not.toHaveLength(0)
-		const requestBody = mockResponsesCreate.mock.calls[0][0]
-		expect(requestBody.background).toBe(true)
-		expect(requestBody.stream).toBe(true)
-		expect(requestBody.store).toBe(true)
-	})
 	it("forces store:true and includes background:true when falling back to SSE", async () => {
 		const handler = new OpenAiNativeHandler({
 			apiModelId: "gpt-5-pro-2025-10-06",

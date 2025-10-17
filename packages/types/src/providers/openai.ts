@@ -41,9 +41,10 @@ export const openAiNativeModels = {
 		maxTokens: 128000,
 		contextWindow: 400000,
 		supportsImages: true,
-		supportsPromptCache: true,
+		// GPT-5 Pro does NOT support prompt caching
+		supportsPromptCache: false,
+		// Reasoning effort is not user-configurable for this model; do not expose the flag or default
 		supportsReasoningEffort: false,
-		reasoningEffort: "high",
 		inputPrice: 15.0,
 		outputPrice: 120.0,
 		description:

@@ -1323,7 +1323,28 @@ export class OpenAiNativeHandler extends BaseProvider implements SingleCompletio
 				})
 
 				if (!res.ok) {
-					throw new Error(`Resume request failed (${res.status})`)
+					// Attach status and classify permanent failures
+					const err: any = new Error(`Resume request failed (${res.status})`)
+					err.status = res.status
+
+					// 401/403 are permanent for the current request - emit failed and stop
+					if (res.status === 401 || res.status === 403) {
+						yield {
+							type: "status",
+							mode: "background",
+							status: "failed",
+							responseId,
+						}
+						throw createTerminalBackgroundError(`Resume unauthorized/forbidden (${res.status})`)
+					}
+
+					// Other statuses (e.g., 404/429/5xx) are treated as transient; log and retry with backoff
+					console.warn?.("[openai-native] resume attempt failed", {
+						attempt,
+						status: res.status,
+						responseId,
+					})
+					throw err
 				}
 				if (!res.body) {
 					throw new Error("Resume request failed (no body)")
@@ -1358,10 +1379,24 @@ export class OpenAiNativeHandler extends BaseProvider implements SingleCompletio
 			} catch (err) {
 				// If terminal error, don't keep retrying resume; fall back to polling immediately
 				const delay = resumeBaseDelayMs * Math.pow(2, attempt)
+
 				if (isTerminalBackgroundError(err)) {
+					console.warn?.("[openai-native] resume terminated", {
+						attempt,
+						responseId,
+						error: (err as any)?.message,
+					})
 					break
 				}
-				// Otherwise retry with backoff
+
+				// Otherwise retry with backoff and lightweight logging for diagnostics
+				console.warn?.("[openai-native] resume retry", {
+					attempt,
+					responseId,
+					error: (err as any)?.message,
+					nextDelayMs: delay,
+				})
+
 				if (delay > 0) {
 					await new Promise((r) => setTimeout(r, delay))
 				}
@@ -1392,7 +1427,23 @@ export class OpenAiNativeHandler extends BaseProvider implements SingleCompletio
 				})
 
 				if (!pollRes.ok) {
-					// transient; wait and retry
+					// Treat auth/permission as permanent; others as transient with logging
+					if (pollRes.status === 401 || pollRes.status === 403) {
+						yield {
+							type: "status",
+							mode: "background",
+							status: "failed",
+							responseId,
+						}
+						throw createTerminalBackgroundError(
+							`Polling unauthorized/forbidden (${pollRes.status}) for ${responseId}`,
+						)
+					}
+
+					console.warn?.("[openai-native] polling non-OK response", {
+						status: pollRes.status,
+						responseId,
+					})
 					await new Promise((r) => setTimeout(r, pollIntervalMs))
 					continue
 				}
