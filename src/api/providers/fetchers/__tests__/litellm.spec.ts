@@ -221,6 +221,7 @@ describe("getLiteLLMModels", () => {
 				maxTokens: 4096,
 				contextWindow: 200000,
 				supportsImages: true,
+				supportsComputerUse: true,
 				supportsPromptCache: false,
 				inputPrice: 3,
 				outputPrice: 15,
@@ -230,6 +231,7 @@ describe("getLiteLLMModels", () => {
 				maxTokens: 8192,
 				contextWindow: 128000,
 				supportsImages: false,
+				supportsComputerUse: false,
 				supportsPromptCache: false,
 				inputPrice: 10,
 				outputPrice: 30,
@@ -298,6 +300,7 @@ describe("getLiteLLMModels", () => {
 			maxTokens: 4096,
 			contextWindow: 200000,
 			supportsImages: true,
+			supportsComputerUse: true,
 			supportsPromptCache: false,
 			inputPrice: undefined,
 			outputPrice: undefined,
@@ -308,6 +311,7 @@ describe("getLiteLLMModels", () => {
 			maxTokens: 4096,
 			contextWindow: 200000,
 			supportsImages: false,
+			supportsComputerUse: false,
 			supportsPromptCache: false,
 			inputPrice: undefined,
 			outputPrice: undefined,
@@ -442,6 +446,7 @@ describe("getLiteLLMModels", () => {
 			maxTokens: 4096,
 			contextWindow: 200000,
 			supportsImages: true,
+			supportsComputerUse: true, // Should be true due to fallback
 			supportsPromptCache: false,
 			inputPrice: undefined,
 			outputPrice: undefined,
@@ -452,6 +457,7 @@ describe("getLiteLLMModels", () => {
 			maxTokens: 8192,
 			contextWindow: 128000,
 			supportsImages: false,
+			supportsComputerUse: false, // Should be false as it's not in fallback list
 			supportsPromptCache: false,
 			inputPrice: undefined,
 			outputPrice: undefined,
@@ -514,6 +520,7 @@ describe("getLiteLLMModels", () => {
 			maxTokens: 4096,
 			contextWindow: 200000,
 			supportsImages: true,
+			supportsComputerUse: false, // False because explicitly set to false (fallback ignored)
 			supportsPromptCache: false,
 			inputPrice: undefined,
 			outputPrice: undefined,
@@ -524,6 +531,7 @@ describe("getLiteLLMModels", () => {
 			maxTokens: 8192,
 			contextWindow: 128000,
 			supportsImages: false,
+			supportsComputerUse: true, // True because explicitly set to true
 			supportsPromptCache: false,
 			inputPrice: undefined,
 			outputPrice: undefined,
@@ -534,6 +542,7 @@ describe("getLiteLLMModels", () => {
 			maxTokens: 8192,
 			contextWindow: 128000,
 			supportsImages: false,
+			supportsComputerUse: false, // False because explicitly set to false
 			supportsPromptCache: false,
 			inputPrice: undefined,
 			outputPrice: undefined,
@@ -588,5 +597,9 @@ describe("getLiteLLMModels", () => {
 		mockedAxios.get.mockResolvedValue(mockResponse)
 
 		const result = await getLiteLLMModels("test-api-key", "http://localhost:4000")
+
+		expect(result["vertex-claude"].supportsComputerUse).toBe(true)
+		expect(result["openrouter-claude"].supportsComputerUse).toBe(true)
+		expect(result["bedrock-claude"].supportsComputerUse).toBe(true)
 	})
 })

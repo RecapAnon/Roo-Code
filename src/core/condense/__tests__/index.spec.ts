@@ -102,6 +102,7 @@ describe("summarizeConversation", () => {
 				info: {
 					contextWindow: 8000,
 					supportsImages: true,
+					supportsComputerUse: true,
 					supportsVision: true,
 					maxTokens: 4000,
 					supportsPromptCache: true,
@@ -576,6 +577,7 @@ describe("summarizeConversation with custom settings", () => {
 				info: {
 					contextWindow: 8000,
 					supportsImages: true,
+					supportsComputerUse: true,
 					supportsVision: true,
 					maxTokens: 4000,
 					supportsPromptCache: true,
@@ -599,6 +601,7 @@ describe("summarizeConversation with custom settings", () => {
 				info: {
 					contextWindow: 4000,
 					supportsImages: true,
+					supportsComputerUse: false,
 					supportsVision: false,
 					maxTokens: 2000,
 					supportsPromptCache: false,

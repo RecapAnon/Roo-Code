@@ -36,6 +36,7 @@ export async function getRequestyModels(baseUrl?: string, apiKey?: string): Prom
 				contextWindow: rawModel.context_window,
 				supportsPromptCache: rawModel.supports_caching,
 				supportsImages: rawModel.supports_vision,
+				supportsComputerUse: rawModel.supports_computer_use,
 				supportsReasoningBudget: reasoningBudget,
 				supportsReasoningEffort: reasoningEffort,
 				inputPrice: parseApiPrice(rawModel.input_price),

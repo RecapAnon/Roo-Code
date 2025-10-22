@@ -121,7 +121,7 @@ describe("getEnvironmentDetails", () => {
 		// Mock other dependencies.
 		;(getApiMetrics as Mock).mockReturnValue({ contextTokens: 50000, totalCost: 0.25 })
 		;(getFullModeDetails as Mock).mockResolvedValue({
-			name: "💻 Code",
+			name: "Code",
 			roleDefinition: "You are a code assistant",
 			customInstructions: "Custom instructions",
 		})

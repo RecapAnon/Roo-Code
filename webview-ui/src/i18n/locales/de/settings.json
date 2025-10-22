@@ -768,6 +768,8 @@
 	"modelInfo": {
 		"supportsImages": "Unterstützt Bilder",
 		"noImages": "Unterstützt keine Bilder",
+		"supportsComputerUse": "Unterstützt Computernutzung",
+		"noComputerUse": "Unterstützt keine Computernutzung",
 		"supportsPromptCache": "Unterstützt Prompt-Cache",
 		"noPromptCache": "Unterstützt keinen Prompt-Cache",
 		"contextWindow": "Kontextfenster:",

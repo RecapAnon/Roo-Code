@@ -47,6 +47,7 @@ export const parseOllamaModel = (rawModel: OllamaModelInfoResponse): ModelInfo =
 		contextWindow: contextWindow || ollamaDefaultModelInfo.contextWindow,
 		supportsPromptCache: true,
 		supportsImages: rawModel.capabilities?.includes("vision"),
+		supportsComputerUse: false,
 		maxTokens: contextWindow || ollamaDefaultModelInfo.contextWindow,
 	})
 
